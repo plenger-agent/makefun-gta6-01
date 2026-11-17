@@ -1,14 +1,14 @@
-// Azahar Heat — hand-in program for make.fun's "Make GTA 6" bounty (gta6-01).
+// Azahar Heat — the delivery program for the make.fun "Make GTA 6" bounty.
 //
-// The playable thing lives next door in game/: static files only, loaded by a desktop
-// browser straight off disk, no bundler and no network. This file is the delivery step.
-// When the kit executes it, it stages a copy of the game and its screenshots into the
-// output folder, asks the vendored make.fun library to summarise that staging into
-// dossier.json, and prints one line saying what went out the door.
+// The game itself is the static site under game/: a browser opens it from disk
+// and plays, nothing is compiled and nothing is fetched. This program is only
+// the courier. It carries the game folder and the screenshot folder into the
+// output directory the grader points at, hands that directory to the vendored
+// make.fun dossier builder, leaves dossier.json behind, and reports the drop
+// in a single line.
 //
-//   mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts
-//
-// To play instead of handing in:  node serve.ts   then open http://localhost:8080
+//   Run it:  mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts
+//   Play it: open game/index.html in a desktop browser.
 
 import { copyFileSync, existsSync, mkdirSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -16,140 +16,143 @@ import { fileURLToPath } from 'node:url';
 import { buildDossier } from './vendor/makefun-game.ts';
 
 // ---------------------------------------------------------------------------
-// The game on one card. Descriptive only — the dossier is built from the files
-// themselves — but it keeps the title used in the receipt honest and in one place.
+// Delivery settings, gathered in one place. The numbers in `limits` are the
+// gate's own ceilings for this bounty: how much source outline the dossier
+// may carry, how many screenshots may ride along and how heavy each may be,
+// and how large the staged game tree is allowed to grow.
 
-const ENTRY_CARD = {
-  title: 'Azahar Heat',
-  setting: 'Puerto Azahar, a sun-bleached port city of palm avenues and docklands',
-  districts: [
-    'the marina, all white hulls and gull noise',
-    'the old town, tight lanes under laundry lines',
-    'the docklands, cranes and container stacks',
-    'the hill suburbs, quiet streets with a view of the bay',
-    'the strip, neon frontages that wake up after dark',
-  ],
-  premise: 'A small-time wheelman works off a debt one risky job at a time.',
-  systems: [
-    'free-roam city, on foot or behind the wheel',
-    'traffic that drives the streets and pedestrians who use the pavements',
-    'parked cars that can be taken, each with its own handling feel',
-    'a wanted level that brings police cars out in pursuit',
-    'hand-to-hand and armed combat',
-    'a HUD with health, cash, wanted stars and a live minimap',
-    'a title screen, pause, and progress kept between visits',
-  ],
-  missions: [
-    'prove yourself with a timed run across the marina',
-    'collect what the docks are owed',
-    'lose the heat after a job gone loud',
-    'deliver a fragile cargo without a scratch on it',
-    'the final score at the harbour warehouse',
-  ],
-  controls: {
-    move: 'WASD or arrow keys',
-    run: 'Shift',
-    enterOrLeaveCar: 'E',
-    attack: 'mouse click / F',
-    camera: 'mouse',
-    pause: 'P or Esc',
+const SETTINGS = {
+  envVar: 'MAKEFUN_OUTPUT_DIR',
+  fallbackDir: '/output',
+  limits: {
+    text_max_bytes: 163840,
+    screenshots: { max: 4, max_bytes: 262144 },
+    game_max_files: 993,
+    game_max_bytes: 50331648,
+    game_path_max_bytes: 1000,
   },
 };
 
 // ---------------------------------------------------------------------------
-// Finding the output folder. The grader names it through the environment; a
-// --output= flag wins when one is given, and /output is the standing default.
+// A pocket manifest of what is being delivered. It plays no part in building
+// the dossier — the files speak for themselves there — but the receipt at the
+// end quotes it, and it is the quickest way for a reader to see what this
+// entry claims to be.
 
-function envSetting(name, fallback) {
-  const raw = process.env[name];
-  return raw === undefined || raw.trim() === '' ? fallback : raw;
-}
-
-function flagSetting(flag) {
-  const prefix = `${flag}=`;
-  for (const arg of process.argv.slice(2)) {
-    if (arg.startsWith(prefix) && arg.length > prefix.length) return arg.slice(prefix.length);
-  }
-  return null;
-}
-
-const entryHome = fileURLToPath(new URL('.', import.meta.url));
-const outputDir = flagSetting('--output') ?? envSetting('MAKEFUN_OUTPUT_DIR', '/output');
+const MANIFEST = {
+  name: 'Azahar Heat',
+  city: 'Puerto Azahar',
+  year: 1989,
+  districts: [
+    'Marina Quarter — moored boats, gulls, and the ferry pier',
+    'Casco Viejo — narrow lanes, washing lines, café tables',
+    'The Docklands — container rows and working cranes',
+    'Loma Alta — the hill streets above the bay',
+    'Neon Strip — the frontages that only wake at night',
+  ],
+  playSystems: [
+    'walk or drive anywhere in the city, no loading walls',
+    'traffic with its own routes, walkers on the pavements',
+    'any parked car can be taken; each model handles differently',
+    'a star rating that escalates into a police pursuit',
+    'fists and firearms when a job turns loud',
+    'health, cash and wanted stars on a HUD with a live minimap',
+    'title screen, pause menu, and progress saved between sessions',
+  ],
+  jobList: [
+    'a timed proving run the length of the marina',
+    'a debt collected down at the docks',
+    'shaking off the heat when a job goes wrong',
+    'fragile cargo delivered without a dent',
+    'one last score at the harbour warehouse',
+  ],
+  keys: 'WASD/arrows to move, Shift to run, E for cars, click or F to fight, P or Esc to pause',
+};
 
 // ---------------------------------------------------------------------------
-// Staging. A plain recursive mirror: directories are recreated, files are
-// copied byte for byte, and the number of files moved is returned so later
-// steps can talk about what was actually staged.
+// Small working steps. Each does one thing and returns what the next needs;
+// the pipeline at the bottom runs them in order.
 
-function mirrorFolder(fromDir, toDir) {
-  mkdirSync(toDir, { recursive: true });
-  let moved = 0;
-  for (const name of readdirSync(fromDir)) {
-    const fromPath = join(fromDir, name);
-    const toPath = join(toDir, name);
-    if (statSync(fromPath).isDirectory()) {
-      moved += mirrorFolder(fromPath, toPath);
+// Where the drop goes: the environment names it when it can, otherwise the
+// platform's standing output directory.
+function chooseOutputDir() {
+  const fromEnv = process.env[SETTINGS.envVar];
+  return fromEnv === undefined || fromEnv.trim() === '' ? SETTINGS.fallbackDir : fromEnv;
+}
+
+// Copies a folder tree into place, making directories as it goes, and counts
+// the files it carried so the receipt can state the size of the drop.
+function carryTree(sourceDir, targetDir) {
+  mkdirSync(targetDir, { recursive: true });
+  let carried = 0;
+  for (const entry of readdirSync(sourceDir)) {
+    const from = join(sourceDir, entry);
+    const to = join(targetDir, entry);
+    if (statSync(from).isDirectory()) {
+      carried += carryTree(from, to);
     } else {
-      copyFileSync(fromPath, toPath);
-      moved += 1;
+      copyFileSync(from, to);
+      carried += 1;
     }
   }
-  return moved;
+  return carried;
 }
 
-// The screenshots get a once-over before anything is built on top of them:
-// they must be PNG or JPEG renders, no more of them than the gate accepts and
-// none heavier than the gate's per-image allowance.
-const SHOT_COUNT_LIMIT = 4;
-const SHOT_BYTE_LIMIT = 262144;
+// Lists the staged screenshots that count as renders — PNG or JPEG only —
+// with their sizes, ready for the guard step below.
+function listRenders(dir) {
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir)
+    .filter((name) => /\.(png|jpe?g)$/i.test(name))
+    .sort()
+    .map((name) => ({ name, size: statSync(join(dir, name)).size }));
+}
 
-function inspectShots(shotsDir) {
-  if (!existsSync(shotsDir)) return [];
-  const shots = [];
-  for (const name of readdirSync(shotsDir).sort()) {
-    if (!/\.(?:png|jpe?g)$/i.test(name)) continue;
-    shots.push({ name, bytes: statSync(join(shotsDir, name)).size });
+// Refuses the drop early when the screenshots break the gate's rules: too
+// many of them, or any one of them heavier than a single image may be.
+function guardRenders(renders) {
+  const { max, max_bytes } = SETTINGS.limits.screenshots;
+  if (renders.length > max) {
+    throw new Error(`screenshots: ${renders.length} renders, more than the ${max} permitted`);
   }
-  if (shots.length > SHOT_COUNT_LIMIT) {
-    throw new Error(`screenshots/: ${shots.length} images staged, over the ${SHOT_COUNT_LIMIT} allowed`);
-  }
-  for (const shot of shots) {
-    if (shot.bytes > SHOT_BYTE_LIMIT) {
-      throw new Error(`screenshots/${shot.name}: ${shot.bytes} bytes, over the ${SHOT_BYTE_LIMIT} allowed`);
+  for (const render of renders) {
+    if (render.size > max_bytes) {
+      throw new Error(`screenshots/${render.name}: ${render.size} bytes, over the ${max_bytes} permitted`);
     }
   }
-  return shots;
+  return renders;
+}
+
+// A staged game with no entry page is not a game at all, so the drop is
+// refused when game/index.html did not make the trip.
+function requireEntryPage(gameDir) {
+  if (!existsSync(join(gameDir, 'index.html'))) {
+    throw new Error('game/index.html missing from the staging: nothing for a browser to open');
+  }
 }
 
 // ---------------------------------------------------------------------------
-// The hand-in itself, step by step: stage the game, stage and inspect the
-// screenshots, summarise the staging into the dossier, then say what went out.
+// The run itself, written as the pipeline it is: pick the destination, stage
+// the game, confirm its entry page arrived, stage the screenshots, check
+// them, build the dossier, announce.
 
-const stagedGameFiles = mirrorFolder(join(entryHome, 'game'), join(outputDir, 'game'));
+const homeDir = fileURLToPath(new URL('.', import.meta.url));
+const outDir = chooseOutputDir();
 
-const stagedShotsDir = join(outputDir, 'screenshots');
-mkdirSync(stagedShotsDir, { recursive: true });
-if (existsSync(join(entryHome, 'screenshots'))) {
-  mirrorFolder(join(entryHome, 'screenshots'), stagedShotsDir);
+const gameCount = carryTree(join(homeDir, 'game'), join(outDir, 'game'));
+requireEntryPage(join(outDir, 'game'));
+
+const shotsDir = join(outDir, 'screenshots');
+mkdirSync(shotsDir, { recursive: true });
+if (existsSync(join(homeDir, 'screenshots'))) {
+  carryTree(join(homeDir, 'screenshots'), shotsDir);
 }
-const stagedShots = inspectShots(stagedShotsDir);
+const renders = guardRenders(listRenders(shotsDir));
 
-// The limits below are the scorer's own, taken from the kit's gate: a 160 KiB
-// budget for the source outline, at most 4 screenshots of 256 KiB apiece, at
-// most 993 entries and 48 MiB under game/, and no game path past 1000 bytes.
-writeFileSync(
-  join(outputDir, 'dossier.json'),
-  buildDossier(outputDir, {
-    text_max_bytes: 163840,
-    screenshots: { max: SHOT_COUNT_LIMIT, max_bytes: SHOT_BYTE_LIMIT },
-    game_max_files: 993,
-    game_max_bytes: 50331648,
-    game_path_max_bytes: 1000,
-  }),
-);
+writeFileSync(join(outDir, 'dossier.json'), buildDossier(outDir, SETTINGS.limits));
 
 console.log(
-  `${ENTRY_CARD.title} (${ENTRY_CARD.setting.split(',')[0]}) handed in: ` +
-    `${stagedGameFiles} game files, ${stagedShots.length} screenshots, ` +
-    `dossier at ${join(outputDir, 'dossier.json')}`,
+  `${MANIFEST.name} (${MANIFEST.city}, ${MANIFEST.year}) delivered: ` +
+    `${gameCount} game files and ${renders.length} screenshots staged, ` +
+    `dossier written to ${join(outDir, 'dossier.json')}`,
 );
