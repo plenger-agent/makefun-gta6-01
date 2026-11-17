@@ -1,79 +1,86 @@
-// The screenshot scenes behind ?shot=start|play|end. Each one plays the real rules forward from a
-// fresh world for a fixed number of steps, steered by a simple autopilot (look ahead each way the
-// paddle could move, keep clear of blocks, chase the lowest coin when that is safe), so the frame
-// is what a short game really looks like and the same seed always gives the same frame.
-import { FIELD, PLAYER, STEP } from './config.js';
-import { EVENT_OVER, KIND_BLOCK } from './world.js';
-import { SCREEN_OVER, SCREEN_PLAY, SCREEN_TITLE } from './render.js';
+// shots.js — the four screenshot scenes behind ?shot=start|drive|chase|mission. Each one
+// stages the real game — the actual world, cars, police and mission state, nothing faked —
+// and lets main.js run its normal loop in fixed steps, so the frame the screenshot captures
+// is a frame the game itself produced. start: the title screen over a sunset vista of the
+// city and the sea. drive: Nico at the wheel on the avenue at dusk. chase: four stars, three
+// cruisers behind and a roadblock ahead. mission: on foot, the gold beacon of the first
+// errand ahead, Lucia's words still on the subtitle bar.
 
-const START_SECONDS = 5;
-const PLAY_SECONDS = 26;
-const END_LIMIT_SECONDS = 600;
-/**
- * How far ahead, in seconds, the autopilot checks each way it could move: the play scene's pilot
- * looks well ahead and keeps all its lives; the end scene's looks only a moment ahead, so it is
- * caught out once the blocks speed up, as a hurried player is.
- */
-const HORIZON_PLAY = 0.7;
-const HORIZON_END = 0.25;
-const SAMPLE = 1 / 30;
-const DIRECTIONS = [0, -1, 1];
-/** Extra room, each side, it keeps between the paddle and a block. */
-const MARGIN = 10;
+import * as THREE from '../vendor/three.module.min.js';
+import { PLACES } from './world.js';
 
-/** Seconds until moving in `direction` (-1, 0, 1) runs the paddle into a block; Infinity when it never does. */
-function timeToHit(state, direction, horizon) {
-  const player = state.player;
-  for (let t = SAMPLE; t <= horizon; t += SAMPLE) {
-    const x = Math.min(FIELD.width - player.width, Math.max(0, player.x + direction * PLAYER.speed * t));
-    for (let index = 0; index < state.items.length; index += 1) {
-      const item = state.items[index];
-      if (!item.active || item.kind !== KIND_BLOCK) continue;
-      const y = item.y + item.speed * t;
-      if (y + item.height > player.y && y < player.y + player.height && item.x < x + player.width + MARGIN && item.x + item.width > x - MARGIN) return t;
-    }
-  }
-  return Infinity;
+function hideTitleShowHud(ctx) {
+  document.getElementById('title-screen').classList.remove('on');
+  ctx.hud.show();
 }
 
-/** Of the safe ways to move, the one toward the lowest coin (or the centre); else the one that is hit last. */
-function autopilot(state, horizon) {
-  const player = state.player;
-  let coin = null;
-  for (let index = 0; index < state.items.length; index += 1) {
-    const item = state.items[index];
-    if (item.active && item.kind !== KIND_BLOCK && (coin === null || item.y > coin.y)) coin = item;
-  }
-  const target = coin === null ? FIELD.width / 2 : coin.x + coin.width / 2;
-  const centre = player.x + player.width / 2;
-  const wanted = target > centre + 8 ? 1 : target < centre - 8 ? -1 : 0;
-  let best = wanted;
-  let bestTime = timeToHit(state, wanted, horizon);
-  for (let index = 0; index < DIRECTIONS.length && bestTime !== Infinity; index += 1) {
-    const time = timeToHit(state, DIRECTIONS[index], horizon);
-    if (time > bestTime) {
-      bestTime = time;
-      best = DIRECTIONS[index];
-    }
-  }
-  return best;
+function putPlayerInCar(ctx, car, speed) {
+  const player = ctx.player;
+  car.driver = 'player';
+  car.parked = false;
+  car.ownedByPlayer = true;
+  car.speed = speed;
+  player.inCar = true;
+  player.car = car;
+  player.group.visible = false;
+  player.pos.copy(car.pos);
+  player.camYaw = car.heading;
+  player.camPitch = 0.3;
+  ctx.camera.position.set(
+    car.pos.x - Math.sin(car.heading) * 11,
+    4.2,
+    car.pos.z - Math.cos(car.heading) * 11,
+  );
 }
 
-/**
- * Set `world` to the named scene (start, play or end; any other name is start) and return the
- * screen to draw over it and the best score to show.
- */
-export function stageShot(name, world) {
-  world.reset();
-  if (name !== 'play' && name !== 'end') {
-    for (let index = 0; index < START_SECONDS / STEP; index += 1) world.step(STEP, 0, true);
-    return { screen: SCREEN_TITLE, best: 0 };
+export function stageShot(name, ctx) {
+  if (name === 'drive') {
+    hideTitleShowHud(ctx);
+    ctx.state = 'play';
+    // Eastbound on the grand avenue (z = 0), in the right-hand lane, mid-evening traffic.
+    const car = ctx.vehicles.spawnCar('sedan', -34, -2.9, Math.PI / 2, 0x3f7fbf);
+    putPlayerInCar(ctx, car, 13);
+    const ahead1 = ctx.vehicles.spawnCar('taxi', 6, -2.9, Math.PI / 2);
+    ahead1.parked = false;
+    const ahead2 = ctx.vehicles.spawnCar('sedan', -12, 2.9, -Math.PI / 2, 0xe05a4e);
+    ahead2.parked = false;
+    ctx.vehicles.spawnCar('hatch', -52, -8.2, Math.PI / 2, 0x74c69d);
+    return;
   }
-  const limit = name === 'end' ? END_LIMIT_SECONDS : PLAY_SECONDS;
-  const horizon = name === 'end' ? HORIZON_END : HORIZON_PLAY;
-  for (let index = 0; index < limit / STEP; index += 1) {
-    if (world.step(STEP, autopilot(world.state, horizon), false) & EVENT_OVER) break;
+  if (name === 'chase') {
+    hideTitleShowHud(ctx);
+    ctx.state = 'play';
+    // Southbound on the east avenue with the whole portuaria behind him.
+    const car = ctx.vehicles.spawnCar('sports', 48.9, 34, Math.PI, 0xe05a4e);
+    putPlayerInCar(ctx, car, 17);
+    const spots = [[48.2, 47], [51.5, 55], [46.8, 58]];
+    for (const [x, z] of spots) {
+      const cop = ctx.vehicles.spawnCar('police', x, z, Math.PI);
+      cop.driver = 'police';
+      cop.parked = false;
+      cop.speed = 16;
+    }
+    ctx.police.setWanted(4);
+    ctx.police.makeRoadblock();
+    ctx.hud.say('El Faro', 'Four stars, Nico. Whatever you do — do not stop.', 30);
+    return;
   }
-  const over = world.state.lives === 0;
-  return { screen: over ? SCREEN_OVER : SCREEN_PLAY, best: world.state.score };
+  if (name === 'mission') {
+    hideTitleShowHud(ctx);
+    ctx.state = 'play';
+    ctx.missions.startMissionByIndex(0);
+    // Nico on the promenade street, the fish market and its gold beacon ahead of him.
+    ctx.player.pos.set(94, 0, -6);
+    ctx.player.heading = Math.atan2(PLACES.fishMarket.x - 94, PLACES.fishMarket.z + 6);
+    ctx.player.camYaw = ctx.player.heading;
+    ctx.player.camPitch = 0.26;
+    ctx.camera.position.set(94 - Math.sin(ctx.player.heading) * 8, 3.4, -6 - Math.cos(ctx.player.heading) * 8);
+    return;
+  }
+  // start (and anything else): the title over the city at golden hour.
+  ctx.state = 'title';
+  ctx.shotVista = {
+    pos: new THREE.Vector3(-108, 31, 92),
+    look: new THREE.Vector3(90, 2, -34),
+  };
 }

@@ -3,17 +3,134 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Block Dodger</title>
+<title>Azahar Heat — an open-world crime game in Puerto Azahar</title>
 <style>
-  html, body { margin: 0; height: 100%; overflow: hidden; background: #11141b; }
-  #game { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
-  /* Read aloud, never shown: the status line screen readers announce. */
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #1a0f1e; font-family: "Trebuchet MS", "Segoe UI", Verdana, sans-serif; }
+  #scene { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
   #status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+
+  /* ---------- HUD ---------- */
+  #hud { position: fixed; inset: 0; pointer-events: none; color: #fff; display: none; }
+  #hud.on { display: block; }
+  .panel { background: rgba(12, 8, 20, 0.55); border: 1px solid rgba(255, 190, 120, 0.35); border-radius: 10px; }
+
+  #vitals { position: absolute; left: 18px; bottom: 18px; padding: 10px 14px; min-width: 210px; }
+  #healthbar { height: 12px; border-radius: 6px; background: rgba(255,255,255,0.18); overflow: hidden; margin-bottom: 7px; }
+  #healthfill { height: 100%; width: 100%; border-radius: 6px; background: linear-gradient(90deg, #ff5a4e, #ffb347); transition: width 0.15s; }
+  #cash { font-size: 22px; font-weight: 700; color: #8dff9a; letter-spacing: 0.5px; text-shadow: 0 1px 3px #000; }
+  #cash small { color: #ffe9c9; font-size: 11px; font-weight: 400; display: block; letter-spacing: 1.5px; }
+
+  #wanted { position: absolute; right: 18px; top: 14px; font-size: 30px; letter-spacing: 4px; text-align: right; text-shadow: 0 2px 6px rgba(0,0,0,0.8); }
+  #wanted .off { color: rgba(255,255,255,0.22); }
+  #wanted .on { color: #ffd23e; }
+  #wanted.flash .on { color: #ff4747; }
+
+  #minimap-wrap { position: absolute; right: 18px; top: 62px; padding: 6px; }
+  #minimap { display: block; width: 188px; height: 188px; border-radius: 6px; }
+
+  #objective { position: absolute; left: 50%; transform: translateX(-50%); top: 16px; max-width: 620px; padding: 9px 18px; text-align: center; font-size: 16px; color: #ffe9c9; }
+  #objective b { color: #ffd23e; }
+  #objective .dist { color: #9adcff; font-weight: 700; }
+
+  #speedo { position: absolute; right: 24px; bottom: 20px; padding: 8px 16px; text-align: center; display: none; }
+  #speedo.on { display: block; }
+  #speedo .num { font-size: 34px; font-weight: 800; color: #fff; line-height: 1; }
+  #speedo .unit { font-size: 11px; letter-spacing: 2px; color: #ffb37a; }
+
+  #subtitle { position: absolute; left: 50%; transform: translateX(-50%); bottom: 86px; max-width: 720px; padding: 10px 20px; text-align: center; font-size: 17px; line-height: 1.45; color: #fff; display: none; }
+  #subtitle.on { display: block; }
+  #subtitle .who { color: #ffd23e; font-weight: 700; }
+
+  #banner { position: absolute; left: 50%; top: 34%; transform: translate(-50%, -50%); text-align: center; display: none; }
+  #banner.on { display: block; }
+  #banner .big { font-size: 54px; font-weight: 900; letter-spacing: 3px; color: #ffd23e; text-shadow: 0 4px 0 #b33a1e, 0 8px 24px rgba(0,0,0,0.7); }
+  #banner .small { font-size: 20px; color: #fff; text-shadow: 0 2px 8px #000; margin-top: 6px; }
+
+  #prompt { position: absolute; left: 50%; transform: translateX(-50%); bottom: 150px; padding: 7px 16px; font-size: 15px; color: #fff; display: none; }
+  #prompt.on { display: block; }
+  #prompt b { color: #ffd23e; }
+
+  #crosshair { position: absolute; left: 50%; top: 50%; width: 6px; height: 6px; margin: -3px 0 0 -3px; border-radius: 50%; background: rgba(255,255,255,0.9); box-shadow: 0 0 4px #000; display: none; }
+  #crosshair.on { display: block; }
+
+  #vignette { position: fixed; inset: 0; pointer-events: none; box-shadow: inset 0 0 140px rgba(20, 0, 10, 0.55); }
+
+  /* ---------- Screens ---------- */
+  .screen { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; flex-direction: column; text-align: center; color: #fff; z-index: 5; }
+  .screen.on { display: flex; }
+  #title-screen { background: linear-gradient(180deg, rgba(30,8,40,0.25) 0%, rgba(30,8,40,0.05) 40%, rgba(20,4,24,0.72) 100%); }
+  #title-screen h1 { font-size: 92px; margin: 0; font-weight: 900; letter-spacing: 4px; line-height: 0.95;
+    background: linear-gradient(180deg, #ffe259 15%, #ffa751 55%, #ff5e8a 100%); -webkit-background-clip: text; background-clip: text; color: transparent;
+    filter: drop-shadow(0 5px 0 rgba(120, 20, 60, 0.85)) drop-shadow(0 12px 28px rgba(0,0,0,0.6)); }
+  #title-screen h2 { margin: 6px 0 0; font-size: 21px; font-weight: 400; letter-spacing: 6px; color: #ffe9c9; text-shadow: 0 2px 8px #000; }
+  #title-screen .story { max-width: 640px; margin: 26px 20px 4px; font-size: 16.5px; line-height: 1.55; color: #fdf3e3; text-shadow: 0 1px 6px #000; }
+  #title-screen .controls { margin-top: 16px; font-size: 13.5px; line-height: 1.9; color: #ffd9ad; text-shadow: 0 1px 4px #000; }
+  #title-screen .controls b { color: #fff; background: rgba(0,0,0,0.45); border: 1px solid rgba(255,255,255,0.35); border-radius: 4px; padding: 0 6px; }
+  .btn { pointer-events: auto; cursor: pointer; margin-top: 22px; font-size: 20px; font-weight: 800; letter-spacing: 2px; color: #2a0e1e;
+    background: linear-gradient(180deg, #ffd23e, #ff9046); border: 0; border-radius: 10px; padding: 13px 42px; box-shadow: 0 6px 22px rgba(0,0,0,0.5); }
+  .btn:hover { filter: brightness(1.08); }
+  .btn.ghost { background: rgba(20,10,26,0.7); color: #ffe9c9; border: 1px solid rgba(255,210,120,0.6); font-size: 15px; padding: 9px 26px; }
+
+  #pause-screen, #busted-screen, #wasted-screen { background: rgba(10, 4, 16, 0.66); }
+  #pause-screen h1, #busted-screen h1, #wasted-screen h1 { font-size: 58px; margin: 0 0 8px; letter-spacing: 4px; }
+  #busted-screen h1 { color: #6db9ff; text-shadow: 0 4px 22px rgba(40,110,255,0.6); }
+  #wasted-screen h1 { color: #ff4747; text-shadow: 0 4px 22px rgba(255,40,40,0.55); }
+  .screen .note { font-size: 16px; color: #ffe9c9; max-width: 520px; line-height: 1.5; }
 </style>
 </head>
 <body>
-<canvas id="game" aria-label="Block Dodger: move the paddle left and right to dodge falling blocks and catch coins"></canvas>
+<canvas id="scene" aria-label="Azahar Heat: a 3D open-world crime game set in the port city of Puerto Azahar"></canvas>
 <p id="status" role="status" aria-live="polite"></p>
+<div id="vignette"></div>
+
+<div id="hud">
+  <div id="objective" class="panel"></div>
+  <div id="wanted"></div>
+  <div id="minimap-wrap" class="panel"><canvas id="minimap" width="376" height="376"></canvas></div>
+  <div id="vitals" class="panel">
+    <div id="healthbar"><div id="healthfill"></div></div>
+    <div id="cash"><small>PUERTO AZAHAR</small>$0</div>
+  </div>
+  <div id="speedo" class="panel"><div class="num">0</div><div class="unit">KM/H</div></div>
+  <div id="subtitle" class="panel"></div>
+  <div id="prompt" class="panel"></div>
+  <div id="banner"><div class="big"></div><div class="small"></div></div>
+  <div id="crosshair"></div>
+</div>
+
+<div id="title-screen" class="screen on">
+  <h1>AZAHAR<br>HEAT</h1>
+  <h2>PUERTO AZAHAR &middot; 1989</h2>
+  <p class="story">You are Nico Ferran, a dock runner with empty pockets and a borrowed name. The port city of
+  Puerto Azahar runs on two things: fish by day and contraband by night. Lucia Ferrer, who owns half the caf&eacute;s on the
+  marina, is offering you work &mdash; small jobs at first. How far you climb is up to you. Just watch the stars:
+  in Azahar, the police count them for you.</p>
+  <div class="controls">
+    <b>W A S D</b> move &nbsp; <b>Shift</b> run &nbsp; <b>Mouse</b> camera &nbsp; <b>E</b> enter / steal car, talk &nbsp; <b>Click</b> shoot &nbsp; <b>F</b> punch<br>
+    In a car: <b>W / S</b> drive &nbsp; <b>Space</b> handbrake &nbsp; <b>E</b> get out &nbsp;&middot;&nbsp; <b>P</b> / <b>Esc</b> pause &nbsp;&middot;&nbsp; Progress saves automatically
+  </div>
+  <button class="btn" id="btn-new">NEW GAME</button>
+  <button class="btn ghost" id="btn-continue" style="display:none">CONTINUE SAVED GAME</button>
+</div>
+
+<div id="pause-screen" class="screen">
+  <h1>PAUSED</h1>
+  <p class="note">The heat waits for no one &mdash; except now. Your cash, missions and position are saved.</p>
+  <button class="btn" id="btn-resume">RESUME</button>
+</div>
+
+<div id="busted-screen" class="screen">
+  <h1>BUSTED</h1>
+  <p class="note">The Polic&iacute;a Portuaria walk you to the station on Calle del Faro. They take a cut of your cash and the heat dies down.</p>
+  <button class="btn" id="btn-busted">WALK OUT</button>
+</div>
+
+<div id="wasted-screen" class="screen">
+  <h1>WASTED</h1>
+  <p class="note">You wake up at Hospital Santa Mar&iacute;a with a headache, a bill, and the whole city still out there.</p>
+  <button class="btn" id="btn-wasted">DISCHARGE ME</button>
+</div>
+
 <script type="module" src="./src/main.js"></script>
 </body>
 </html>

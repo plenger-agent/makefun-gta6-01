@@ -1,134 +1,271 @@
-// Boot and the one loop: input is read every frame, the world advances in fixed 1/60 s steps
-// (several in a slow frame, none in a fast one), and the renderer paints what is there. The game
-// moves between four screens: title, play, paused and game over.
-//
-// ?seed=N fixes the falling pattern. ?shot=start|play|end (with &seed=N) stages that scene
-// instead of running the loop, paints it twice and sets window.__shotReady for a screenshot.
-import { BEST_KEY, LIVES, STEP } from './config.js';
-import { createRandom } from './random.js';
-import { createWorld, EVENT_HIT, EVENT_OVER } from './world.js';
-import { ACTION_CONFIRM, ACTION_PAUSE, createInput } from './input.js';
-import { createRenderer, SCREEN_OVER, SCREEN_PAUSED, SCREEN_PLAY, SCREEN_TITLE } from './render.js';
+// main.js — the boot and the heartbeat of Azahar Heat. It builds the renderer and the game
+// context, wires the modules together in dependency order (world, vehicles, player,
+// pedestrians, traffic, police, combat, missions, HUD), owns the keyboard and mouse, runs
+// the fixed-feel frame loop, and moves between the game's states: title, play, paused,
+// busted and wasted. It also owns the save file in localStorage — cash, story progress and
+// where Nico was standing — and the screenshot staging hook (?shot=…) the kit's shots use.
+
+import * as THREE from '../vendor/three.module.min.js';
+import { createWorld } from './world.js';
+import { createAudio } from './audio.js';
+import { createVehicles } from './vehicles.js';
+import { createPlayer } from './player.js';
+import { createPeds } from './peds.js';
+import { createTraffic } from './traffic.js';
+import { createPolice } from './police.js';
+import { createCombat } from './combat.js';
+import { createMissions } from './missions.js';
+import { createHUD } from './hud.js';
 import { stageShot } from './shots.js';
 
-/** The longest frame the loop catches up on; a longer stall (a hidden tab) is dropped, not replayed. */
-const MAX_FRAME = 0.25;
-
+const SAVE_KEY = 'azahar-heat-save-v1';
 const params = new URLSearchParams(window.location.search);
-const shot = params.get('shot');
+const shotName = params.get('shot');
 const seedParam = Number.parseInt(params.get('seed') ?? '', 10);
-const seed = Number.isInteger(seedParam) ? seedParam : Math.floor(Math.random() * 4294967296);
+const seed = Number.isInteger(seedParam) ? seedParam : 20240817;
 
-const canvas = document.getElementById('game');
-const status = document.getElementById('status');
-const world = createWorld(createRandom(seed));
-const renderer = createRenderer(canvas);
+const canvas = document.getElementById('scene');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.12;
+window.addEventListener('resize', () => {
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  ctx.camera.aspect = window.innerWidth / window.innerHeight;
+  ctx.camera.updateProjectionMatrix();
+});
 
-function readBest() {
+/* ------------------------------------------------------------------ input */
+
+const input = {
+  keys: new Set(),
+  pressed: new Set(),
+  mouseDX: 0,
+  mouseDY: 0,
+  clicked: false,
+};
+let mouseDown = false;
+window.addEventListener('keydown', (e) => {
+  if (!e.repeat) input.pressed.add(e.code);
+  input.keys.add(e.code);
+  if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.code)) e.preventDefault();
+});
+window.addEventListener('keyup', (e) => input.keys.delete(e.code));
+window.addEventListener('blur', () => input.keys.clear());
+canvas.addEventListener('mousedown', () => {
+  mouseDown = true;
+  if (ctx.state === 'play' && document.pointerLockElement !== canvas && !shotName) {
+    canvas.requestPointerLock();
+  } else if (ctx.state === 'play') {
+    input.clicked = true;
+  }
+});
+window.addEventListener('mouseup', () => { mouseDown = false; });
+window.addEventListener('mousemove', (e) => {
+  if (document.pointerLockElement === canvas || mouseDown) {
+    input.mouseDX += e.movementX || 0;
+    input.mouseDY += e.movementY || 0;
+  }
+});
+window.addEventListener('contextmenu', (e) => e.preventDefault());
+
+/* ------------------------------------------------------------------ context */
+
+const ctx = {
+  seed,
+  state: 'title',
+  cash: 0,
+  time: 0,
+  input,
+  scene: new THREE.Scene(),
+  camera: new THREE.PerspectiveCamera(58, window.innerWidth / window.innerHeight, 0.1, 1500),
+  renderer,
+  saveGame,
+  addCash,
+  gameOver,
+};
+ctx.world = createWorld(ctx);
+ctx.audio = createAudio();
+ctx.vehicles = createVehicles(ctx);
+ctx.player = createPlayer(ctx);
+ctx.peds = createPeds(ctx);
+ctx.traffic = createTraffic(ctx);
+ctx.police = createPolice(ctx);
+ctx.combat = createCombat(ctx);
+ctx.missions = createMissions(ctx);
+ctx.hud = createHUD(ctx);
+ctx.camera.position.set(-96, 26, 96);
+ctx.camera.lookAt(40, 4, -20);
+
+/* ------------------------------------------------------------------ save */
+
+function readSave() {
   try {
-    return Number.parseInt(window.localStorage.getItem(BEST_KEY) ?? '0', 10) || 0;
+    const raw = window.localStorage.getItem(SAVE_KEY);
+    return raw ? JSON.parse(raw) : null;
   } catch {
-    return 0;
+    return null;
   }
 }
 
-function saveBest(value) {
+function saveGame() {
   try {
-    window.localStorage.setItem(BEST_KEY, String(value));
+    window.localStorage.setItem(SAVE_KEY, JSON.stringify({
+      cash: ctx.cash,
+      missionIndex: ctx.missions.index,
+      x: Math.round(ctx.player.pos.x * 10) / 10,
+      z: Math.round(ctx.player.pos.z * 10) / 10,
+    }));
   } catch {
-    // Storage can be off (private windows): the best score then lasts this visit only.
+    // Private windows and full storage just mean the save lasts this visit.
   }
 }
 
-function runShot(name) {
-  const scene = stageShot(name, world);
-  let painted = 0;
-  function paint() {
-    renderer.draw(world.state, scene.screen, scene.best);
-    painted += 1;
-    if (painted < 2) requestAnimationFrame(paint);
-    else window.__shotReady = true;
-  }
-  requestAnimationFrame(paint);
+function addCash(amount) {
+  ctx.cash = Math.max(0, ctx.cash + amount);
+  saveGame();
 }
 
-function runGame() {
-  const input = createInput(canvas);
-  let screen = SCREEN_TITLE;
-  let best = readBest();
-  let accumulator = 0;
-  let last = performance.now();
+/* ------------------------------------------------------------------ states */
 
-  // Screen readers (and anyone watching the page's text) hear the screen changes and each hit.
-  function announce(message) {
-    status.textContent = message;
+const screens = {
+  title: document.getElementById('title-screen'),
+  pause: document.getElementById('pause-screen'),
+  busted: document.getElementById('busted-screen'),
+  wasted: document.getElementById('wasted-screen'),
+};
+function showScreen(name) {
+  for (const [key, el] of Object.entries(screens)) el.classList.toggle('on', key === name);
+}
+
+function startGame(fromSave) {
+  ctx.audio.init();
+  const save = fromSave ? readSave() : null;
+  if (save) {
+    ctx.cash = save.cash || 0;
+    ctx.missions.index = save.missionIndex || 0;
+    ctx.player.pos.set(save.x ?? -50, 0, save.z ?? 57);
+  } else {
+    ctx.cash = 0;
+    ctx.missions.index = 0;
+    try { window.localStorage.removeItem(SAVE_KEY); } catch { /* ignore */ }
   }
+  showScreen(null);
+  ctx.hud.show();
+  ctx.state = 'play';
+  if (!shotName) canvas.requestPointerLock();
+  document.getElementById('status').textContent = 'Playing Azahar Heat.';
+}
 
-  function startGame() {
-    world.reset();
-    accumulator = 0;
-    screen = SCREEN_PLAY;
-    announce(`Playing. ${LIVES} lives.`);
+function gameOver(kind) {
+  if (ctx.state !== 'play') return;
+  ctx.state = kind;
+  document.exitPointerLock?.();
+  if (kind === 'busted') ctx.audio.bustedSting();
+  showScreen(kind);
+}
+
+function resolveGameOver() {
+  if (ctx.state === 'busted') {
+    addCash(-Math.floor(ctx.cash * 0.1));
+    ctx.police.clearWanted();
+    ctx.player.respawn(-23, -50); // outside the Policía Portuaria
+  } else if (ctx.state === 'wasted') {
+    addCash(-Math.min(ctx.cash, 150));
+    ctx.police.clearWanted();
+    ctx.player.respawn(58, 52); // outside Hospital Santa María
   }
+  showScreen(null);
+  ctx.state = 'play';
+  saveGame();
+}
 
-  function endGame() {
-    screen = SCREEN_OVER;
-    if (world.state.score > best) {
-      best = world.state.score;
-      saveBest(best);
-    }
-    announce(`Game over. Score ${world.state.score}. Best ${best}.`);
+document.getElementById('btn-new').addEventListener('click', () => startGame(false));
+document.getElementById('btn-resume').addEventListener('click', () => {
+  showScreen(null);
+  ctx.state = 'play';
+  if (!shotName) canvas.requestPointerLock();
+});
+document.getElementById('btn-busted').addEventListener('click', resolveGameOver);
+document.getElementById('btn-wasted').addEventListener('click', resolveGameOver);
+if (readSave()) document.getElementById('btn-continue').style.display = '';
+document.getElementById('btn-continue').addEventListener('click', () => startGame(true));
+
+function togglePause() {
+  if (ctx.state === 'play') {
+    ctx.state = 'paused';
+    showScreen('pause');
+    document.exitPointerLock?.();
+    saveGame();
+  } else if (ctx.state === 'paused') {
+    showScreen(null);
+    ctx.state = 'play';
+    if (!shotName) canvas.requestPointerLock();
   }
+}
 
-  function handleActions() {
-    const actions = input.takeActions();
-    if (actions & ACTION_CONFIRM && (screen === SCREEN_TITLE || screen === SCREEN_OVER)) startGame();
-    else if (actions & ACTION_PAUSE && screen === SCREEN_PLAY) {
-      screen = SCREEN_PAUSED;
-      announce('Paused.');
-    } else if (actions & (ACTION_PAUSE | ACTION_CONFIRM) && screen === SCREEN_PAUSED) {
-      screen = SCREEN_PLAY;
-      announce('Playing.');
-    }
-  }
+/* ------------------------------------------------------------------ the loop */
 
-  function step() {
-    if (screen === SCREEN_TITLE) {
-      world.step(STEP, 0, true);
-      return;
-    }
-    const events = world.step(STEP, input.direction(), false);
-    if (events & EVENT_OVER) endGame();
-    else if (events & EVENT_HIT) announce(world.state.lives === 1 ? 'Hit. 1 life left.' : `Hit. ${world.state.lives} lives left.`);
-  }
+let last = performance.now();
+let saveTimer = 0;
 
-  function frame(now) {
-    requestAnimationFrame(frame);
-    accumulator += Math.min((now - last) / 1000, MAX_FRAME);
-    last = now;
-    handleActions();
-    if (screen === SCREEN_TITLE || screen === SCREEN_PLAY) {
-      while (accumulator >= STEP && (screen === SCREEN_TITLE || screen === SCREEN_PLAY)) {
-        step();
-        accumulator -= STEP;
-      }
-    } else {
-      accumulator = 0;
-    }
-    renderer.draw(world.state, screen, best);
-  }
-
-  // Leaving the tab pauses a running game rather than letting blocks fall unseen.
-  document.addEventListener('visibilitychange', () => {
-    if (document.hidden && screen === SCREEN_PLAY) {
-      screen = SCREEN_PAUSED;
-      announce('Paused.');
-    }
-  });
-
-  announce('Block Dodger. Press Space or click to start.');
+function frame(now) {
   requestAnimationFrame(frame);
+  let dt = Math.min((now - last) / 1000, 0.05);
+  last = now;
+  if (shotName) dt = 1 / 30; // screenshots step in fixed time, however fast the machine is
+  ctx.time += dt;
+  const t = ctx.time;
+
+  if (input.pressed.has('KeyP') || input.pressed.has('Escape')) {
+    if (ctx.state === 'play' || ctx.state === 'paused') togglePause();
+  }
+
+  if (ctx.state === 'title') {
+    // A slow cinematic drift over the city while the title is up — unless a screenshot
+    // staging has pinned the camera to a particular vista.
+    if (ctx.shotVista) {
+      ctx.camera.position.copy(ctx.shotVista.pos);
+      ctx.camera.lookAt(ctx.shotVista.look);
+    } else {
+      const a = t * 0.045 + 2.2;
+      ctx.camera.position.set(Math.cos(a) * 118, 27 + Math.sin(t * 0.11) * 5, Math.sin(a) * 118);
+      ctx.camera.lookAt(30, 3, -10);
+    }
+    ctx.world.update(dt, t);
+    ctx.traffic.update(dt, t);
+    ctx.peds.update(dt);
+  } else if (ctx.state === 'play') {
+    ctx.world.update(dt, t);
+    ctx.player.update(dt);
+    ctx.traffic.update(dt, t);
+    ctx.peds.update(dt);
+    ctx.police.update(dt, t);
+    ctx.combat.update(dt);
+    ctx.missions.update(dt, t);
+    ctx.hud.update(dt, t);
+    saveTimer += dt;
+    if (saveTimer > 10) {
+      saveTimer = 0;
+      saveGame();
+    }
+  } else {
+    // Paused, busted or wasted: the world holds its breath, the sea does not.
+    ctx.world.update(dt, t);
+    if (ctx.state === 'paused') ctx.hud.update(0, t);
+  }
+  input.pressed.clear();
+  if (ctx.state !== 'play') input.clicked = false;
+  renderer.render(ctx.scene, ctx.camera);
+  if (shotName) {
+    shotFrames += 1;
+    if (shotFrames > 55 && !window.__shotReady) window.__shotReady = true;
+  }
 }
 
-if (shot) runShot(shot);
-else runGame();
+/* ------------------------------------------------------------------ shots */
+
+let shotFrames = 0;
+if (shotName) stageShot(shotName, ctx);
+requestAnimationFrame(frame);
